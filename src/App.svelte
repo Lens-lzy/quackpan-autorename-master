@@ -1,0 +1,287 @@
+<script lang="ts">
+  import { onMount } from "svelte";
+  import {
+    Button,
+    Modal,
+    Tabs,
+    TabItem,
+    Label,
+    Input,
+    Spinner,
+    Table,
+    TableBody,
+    TableBodyCell,
+    TableBodyRow,
+    TableHead,
+    TableHeadCell,
+    Checkbox,
+  } from "flowbite-svelte";
+  import AddingTextForm from "./components/AddingTextForm.svelte";
+  import { AddingMode } from "./types/index";
+  import * as processor from "./utils/processor";
+  import { renameFile } from "./utils/network";
+
+  interface AliyunDriveFile {
+    drive_id: string;
+    file_id: string;
+    name: string;
+  }
+
+  let isShowingRenameModal = false;
+  let isShowingSelectFileModal = false;
+  let searchText: string;
+  let isRegex: boolean;
+  let replaceText: string = "";
+  let exampleInput: string;
+  $: exampleText = isReplaceMode
+    ? processor.replace({ orgText: exampleInput, searchText, replaceText, isRegex })
+    : processor.adding({ orgText: exampleInput, addingText, addingMode });
+  let isLoading = false;
+
+  let isReplaceMode = true;
+  let addingText: string = "";
+  let addingMode: AddingMode = AddingMode.Before;
+
+  let selectedFileIds: string[] = [];
+
+  let site: "aliyun" | "kuake" = window.location.host.includes("ali") ? "aliyun" : "kuake";
+
+  let aliyundriveFileList: AliyunDriveFile[] = [];
+  let aliyundriveFileRouter: String = '';
+
+  if (site === "aliyun") {
+    console.log("[vite-plugin-monkey] site....", window);
+
+    onMount(() => {
+      const originalSend = XMLHttpRequest.prototype.send;
+
+      XMLHttpRequest.prototype.send = function (data) {
+        this.addEventListener("load", function (event) {
+          if (this.status == 200) {
+            const responseURL = this.responseURL;
+            if (responseURL.indexOf("/file/list") > 0) {
+              var response = this.response;
+              try {
+                response = JSON.parse(response);
+              } catch (error) {}
+              console.log("[vite-plugin-monkey] response:", response);
+              if (aliyundriveFileRouter !== window.location.href) {
+                aliyundriveFileRouter = window.location.href;
+                aliyundriveFileList = [];
+              }
+              const fileIdsSet = new Set(aliyundriveFileList.map(item => item.file_id));
+              const newAliyundriveFileList = (response.items as AliyunDriveFile[]).filter(item => !fileIdsSet.has(item.file_id));
+              if (newAliyundriveFileList.length > 0) {
+                aliyundriveFileList.push(...newAliyundriveFileList);
+              }
+              if (aliyundriveFileList) {
+                setTimeout(() => {
+                  showRenameButton();
+                }, 200);
+              }
+            }
+          }
+        });
+
+        // 调用原始的 send 方法
+        originalSend.call(this, data);
+      };
+    });
+  } else if (site === "kuake") {
+    // 监听表格选中事件
+    window.addEventListener("load", () => {
+      showRenameButton();
+    });
+  }
+
+  // 获取选中的文件列表
+  function getSelectedItems() {
+    const items: { fileId: string; fileName: string }[] = [];
+    document.querySelectorAll(".ant-table-row-selected").forEach((el) => {
+      const fileId = el.getAttribute("data-row-key");
+      const fileName = el.querySelector(".filename-text").getAttribute("title");
+      items.push({ fileId, fileName });
+    });
+    console.log("[vite-plugin-monkey] selected:", items);
+    return items;
+  }
+
+  // 显示重命名按钮
+  function showRenameButton() {
+    const isExist = document.body.querySelector("#renameBtn");
+    if (isExist) {
+      return;
+    }
+
+    const renameBtn = document.createElement("button");
+    renameBtn.id = "renameBtn";
+    renameBtn.className =
+      " absolute right-2 top-2 p-2 w-10 w-10 text-sm font-medium leading-5 text-white transition-colors duration-150 bg-blue-600 border border-transparent active:bg-blue-600 hover:bg-blue-700 focus:outline-none focus:shadow-outline-blue rounded-full ";
+    renameBtn.innerHTML = "🛠";
+    renameBtn.addEventListener("click", () => {
+      console.log("[vite-plugin-monkey] rename click");
+
+      if (site === "aliyun") {
+        showSelectFileModal();
+      } else {
+        showDialog();
+      }
+    });
+    document.body.appendChild(renameBtn);
+  }
+
+  function showSelectFileModal() {
+    isShowingSelectFileModal = true;
+  }
+
+  // 显示重命名弹窗
+  function showDialog() {
+    if (site === "kuake") {
+      if (getSelectedItems().length == 0) {
+        alert("请先选中文件");
+        return;
+      }
+
+      const selectedItems = getSelectedItems();
+      exampleInput = selectedItems?.[0]?.fileName;
+    } else {
+      console.log("[vite-plugin-monkey] select files:", selectedFileIds);
+      exampleInput = aliyundriveFileList.find((item) => selectedFileIds.includes(item.file_id)).name;
+    }
+
+    isShowingRenameModal = true;
+  }
+
+  async function rename() {
+    if (site === "kuake") {
+      for (const item of getSelectedItems()) {
+        const newFileName = process(item.fileName);
+        if (!newFileName || newFileName === item.fileName) {
+          continue;
+        }
+        await renameFile(site, item.fileId, newFileName, null);
+      }
+    } else {
+      for (const fileId of selectedFileIds) {
+        const file = aliyundriveFileList.find((item) => item.file_id === fileId);
+        const newFileName = process(file.name);
+        if (!newFileName || newFileName === file.name) {
+          continue;
+        }
+        await renameFile(site, fileId, newFileName, file.drive_id);
+      }
+    }
+  }
+
+  // 提交重命名请求
+  async function submit() {
+    console.log("[vite-plugin-monkey] submit");
+    console.log({ findText: searchText, replaceText });
+
+    isLoading = true;
+
+    await rename();
+
+    isLoading = false;
+    isShowingRenameModal = false;
+
+    // 刷新当前页面
+    window.location.reload();
+  }
+
+  function process(orgText) {
+    console.log("[vite-plugin-monkey] process", { orgText, searchText, replaceText, addingText, addingMode });
+
+    if (isReplaceMode) {
+      if (!searchText || searchText.length === 0) {
+        return null;
+      }
+    } else {
+      if (!addingText || addingText.length === 0) {
+        return null;
+      }
+    }
+
+    return isReplaceMode
+      ? processor.replace({ orgText, searchText, replaceText, isRegex })
+      : processor.adding({ orgText, addingText, addingMode });
+  }
+</script>
+
+<Modal title="选择文件" bind:open={isShowingSelectFileModal}>
+  <Table hoverable={true}>
+    <TableHead>
+      <TableHeadCell class="w-4">
+        <Checkbox
+          on:change={(e) => {
+            // @ts-ignore
+            const cheked = e.target.checked;
+            cheked ? (selectedFileIds = aliyundriveFileList.map((item) => item.file_id)) : (selectedFileIds = []);
+          }}
+        />
+      </TableHeadCell>
+      <TableHeadCell>文件名称</TableHeadCell>
+    </TableHead>
+    <TableBody>
+      {#each aliyundriveFileList as file}
+        <TableBodyRow>
+          <TableBodyCell>
+            <Checkbox bind:group={selectedFileIds} value={file.file_id} />
+          </TableBodyCell>
+          <TableBodyCell>{file.name}</TableBodyCell>
+        </TableBodyRow>
+      {/each}
+    </TableBody>
+  </Table>
+  <svelte:fragment slot="footer">
+    <Button
+      color="blue"
+      on:click={() => {
+        isShowingSelectFileModal = false;
+        showDialog();
+      }}
+      disabled={selectedFileIds.length === 0}
+    >
+      继续
+    </Button>
+    <Button color="alternative" on:click={() => (isShowingSelectFileModal = false)}>取消</Button>
+  </svelte:fragment>
+</Modal>
+
+<Modal title="批量重命名" bind:open={isShowingRenameModal}>
+  <div>
+    <Tabs>
+      <TabItem bind:open={isReplaceMode} title="替换文本">
+        <div class="space-y-4">
+          <div>
+            <Label for="default-input" class="block mb-2 flex items-center">查找 <Checkbox class="ml-5" bind:checked={isRegex}>正则</Checkbox></Label>
+            <Input id="default-input" required bind:value={searchText} />
+          </div>
+          <div>
+            <Label for="first_name" class="mb-2">替换成</Label>
+            <Input type="text" id="first_name" required bind:value={replaceText} />
+          </div>
+        </div>
+      </TabItem>
+      <TabItem title="添加文本">
+        <AddingTextForm bind:addingMode bind:addingText />
+      </TabItem>
+    </Tabs>
+    <div class="mt-5">示例：{exampleText}</div>
+  </div>
+  <svelte:fragment slot="footer">
+    <Button
+      color="blue"
+      on:click={() => {
+        submit();
+      }}
+      disabled={isLoading}
+    >
+      {#if isLoading}
+        <Spinner class="mr-3" size="4" color="white" />
+      {/if}
+      重新命名
+    </Button>
+    <Button color="alternative" on:click={() => (isShowingRenameModal = false)}>取消</Button>
+  </svelte:fragment>
+</Modal>
